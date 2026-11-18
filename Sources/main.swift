@@ -84,6 +84,7 @@ enum Bluetooth {
 final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentralManagerDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
+    private lazy var logWindow = LogWindow()
     private let work = DispatchQueue(label: "local.devicenap.bluetooth", qos: .userInitiated)
     private let logger = Logger(subsystem: "local.devicenap", category: "connection")
     private let preferences = UserDefaults.standard
@@ -291,6 +292,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
         if service.status == .requiresApproval {
             _ = add(localized("前往系统设置批准登录项"), action: #selector(openLoginSettings), to: menu)
         }
+        _ = add(localized("查看日志…"), action: #selector(showLog), to: menu)
         _ = add(localized("退出 DeviceNap"), action: #selector(quit), to: menu, key: "q")
     }
 
@@ -345,6 +347,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
 
     @objc private func refresh() { refreshDevices() }
     @objc private func openLoginSettings() { SMAppService.openSystemSettingsLoginItems() }
+    @objc private func showLog() { logWindow.open() }
     @objc private func quit() { NSApp.terminate(nil) }
 
     @objc private func toggleLogin() {

@@ -28,3 +28,11 @@
 "打开蓝牙隐私设置…" = "Open Bluetooth Privacy Settings…";
 "系统限制了蓝牙权限" = "Bluetooth access is restricted by macOS";
 "无法读取蓝牙权限" = "Could not determine Bluetooth access";
+"查看日志…" = "View Log…";
+"DeviceNap 日志" = "DeviceNap Log";
+"刷新日志" = "Refresh";
+"复制全部" = "Copy All";
+"最近 30 分钟" = "Last 30 minutes";
+"正在读取日志…" = "Reading log…";
+"最近 30 分钟没有日志" = "No log entries in the last 30 minutes";
+"无法读取 DeviceNap 日志，请重试。" = "Could not read the DeviceNap log. Try again.";
