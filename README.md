@@ -22,6 +22,8 @@ open build/DeviceNap.app
 
 The build is ad hoc signed for local use. For a permanent installation, move the app to Applications before enabling launch at login.
 
+Run `./package.sh` to build a universal DMG for Apple silicon and Intel Macs. Open the DMG and drag DeviceNap to Applications. This build uses an ad hoc signature and has not been notarized by Apple.
+
 ## Set up
 
 1. Click the moon icon in the menu bar.
