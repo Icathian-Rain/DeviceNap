@@ -2,6 +2,13 @@
 
 Bug reports and pull requests are welcome. For a bug report, include the macOS version, Mac model, affected Bluetooth device model, and the steps to reproduce the issue. Redact Bluetooth addresses and personal device names.
 
+## Project layout
+
+- `Sources/main.swift` starts the app or runs the Bluetooth diagnostic command.
+- `Sources/DeviceNap.swift` owns the menu bar, authorization, and sleep/wake state.
+- `Sources/Bluetooth.swift` lists devices and reconnects through a bounded helper process. `Sources/BluetoothPower.swift` implements the optional controller power changes.
+- `Sources/LogWindow.swift` displays app events from the macOS unified log. `Resources` contains English and Simplified Chinese strings.
+
 ## Verify a change
 
 ```sh
