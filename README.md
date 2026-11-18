@@ -35,7 +35,7 @@ If you use another sleep utility that manages Bluetooth, quit it before testing 
 
 ## Troubleshooting
 
-If the device does not reconnect, wake it and choose **Connect now**. Choose **View Log…** from the menu bar to view, refresh, or copy the last 30 minutes of events. For diagnostics from Terminal, run:
+If the device does not reconnect, wake it and choose **Connect now**. Choose **View Log…** from the menu bar to view, refresh, or copy the last 30 minutes of events. The log includes the sleep and wake notifications and the time from the wake notification to a confirmed Bluetooth connection. For diagnostics from Terminal, run:
 
 ```sh
 build/DeviceNap.app/Contents/MacOS/DeviceNap --check

@@ -95,6 +95,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
     private var authorization: CBManagerAuthorization?
     private var hasBluetoothAccess: Bool { CBCentralManager.authorization == .allowedAlways }
     private var sleeping = false
+    private var wakeTime: DispatchTime?
     private var generation = 0
     private var powerPort: io_connect_t = 0
     private var notifications: IONotificationPortRef?
@@ -167,6 +168,8 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
             IOAllowPowerChange(powerPort, token)
         case 0xe0000280: // kIOMessageSystemWillSleep
             sleeping = true
+            wakeTime = nil
+            logger.notice("\(localized("收到系统睡眠通知"), privacy: .public)")
             generation += 1
             let port = powerPort
             let sleepGeneration = generation
@@ -197,7 +200,9 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
                 }
             }
         case 0xe0000300: // kIOMessageSystemHasPoweredOn
+            wakeTime = .now()
             sleeping = false
+            logger.notice("\(localized("收到系统唤醒通知"), privacy: .public)")
             generation += 1
             if let address = selection { reconnect(address, attempt: 1, generation: generation) }
         default:
@@ -215,6 +220,12 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
             DispatchQueue.main.async {
                 guard self.generation == generation, !self.sleeping else { return }
                 if confirmed {
+                    if let wakeTime = self.wakeTime {
+                        let seconds = Double(DispatchTime.now().uptimeNanoseconds - wakeTime.uptimeNanoseconds) / 1_000_000_000
+                        let message = localized("%@ 已连接 · 距收到系统唤醒通知 %.2f 秒", name, seconds)
+                        self.logger.notice("\(message, privacy: .public)")
+                        self.wakeTime = nil
+                    }
                     self.publish(localized("%@ 已连接", name))
                     self.refreshDevices()
                 } else if attempt < 5 {
@@ -333,6 +344,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
 
     @objc private func choose(_ sender: NSMenuItem) {
         let device = sender.representedObject as? Device
+        if device?.address != selection { wakeTime = nil }
         generation += 1
         preferences.set(device?.address, forKey: "deviceAddress")
         preferences.set(device?.name, forKey: "deviceName")
