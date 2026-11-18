@@ -3,7 +3,6 @@ import CoreBluetooth
 import Darwin
 import IOBluetooth
 import IOKit.pwr_mgt
-import OSLog
 import ServiceManagement
 
 func localized(_ key: String, _ arguments: CVarArg...) -> String {
@@ -86,7 +85,6 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
     private let menu = NSMenu()
     private lazy var logWindow = LogWindow()
     private let work = DispatchQueue(label: "local.devicenap.bluetooth", qos: .userInitiated)
-    private let logger = Logger(subsystem: "local.devicenap", category: "connection")
     private let preferences = UserDefaults.standard
     private var devices: [Device] = []
     private var listing = false
@@ -138,7 +136,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
         let current = CBCentralManager.authorization
         guard authorization != current else { return }
         authorization = current
-        logger.info("Bluetooth authorization: \(current.rawValue)")
+        LogKind.connection.write("Bluetooth authorization: \(current.rawValue)")
         if current == .allowedAlways {
             if let selection { reconnect(selection, attempt: 1, generation: generation) }
             refreshDevices()
@@ -169,7 +167,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
         case 0xe0000280: // kIOMessageSystemWillSleep
             sleeping = true
             wakeTime = nil
-            logger.notice("\(localized("收到系统睡眠通知"), privacy: .public)")
+            LogKind.sleep.write(localized("收到系统睡眠通知"), persistent: true)
             generation += 1
             let port = powerPort
             let sleepGeneration = generation
@@ -196,13 +194,16 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
                 DispatchQueue.main.async {
                     acknowledge()
                     guard self.sleeping, self.generation == sleepGeneration else { return }
-                    self.publish(requested ? localized("已请求断开 %@", name) : localized("睡眠前断开 %@ 失败", name))
+                    self.publish(
+                        requested ? localized("已请求断开 %@", name) : localized("睡眠前断开 %@ 失败", name),
+                        kind: requested ? .connection : .problem
+                    )
                 }
             }
         case 0xe0000300: // kIOMessageSystemHasPoweredOn
             wakeTime = .now()
             sleeping = false
-            logger.notice("\(localized("收到系统唤醒通知"), privacy: .public)")
+            LogKind.wake.write(localized("收到系统唤醒通知"), persistent: true)
             generation += 1
             if let address = selection { reconnect(address, attempt: 1, generation: generation) }
         default:
@@ -223,25 +224,26 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
                     if let wakeTime = self.wakeTime {
                         let seconds = Double(DispatchTime.now().uptimeNanoseconds - wakeTime.uptimeNanoseconds) / 1_000_000_000
                         let message = localized("%@ 已连接 · 距收到系统唤醒通知 %.2f 秒", name, seconds)
-                        self.logger.notice("\(message, privacy: .public)")
+                        self.publish(message, kind: .connected, persistent: true)
                         self.wakeTime = nil
+                    } else {
+                        self.publish(localized("%@ 已连接", name), kind: .connected)
                     }
-                    self.publish(localized("%@ 已连接", name))
                     self.refreshDevices()
                 } else if attempt < 5 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                         self.reconnect(address, attempt: attempt + 1, generation: generation)
                     }
                 } else {
-                    self.publish(localized("未能连接 %@ · 可手动重试", name))
+                    self.publish(localized("未能连接 %@ · 可手动重试", name), kind: .problem)
                 }
             }
         }
     }
 
-    private func publish(_ message: String) {
+    private func publish(_ message: String, kind: LogKind = .connection, persistent: Bool = false) {
         status = message
-        logger.info("\(message, privacy: .public)")
+        kind.write(message, persistent: persistent)
         rebuildMenu()
     }
 
@@ -372,7 +374,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
             }
             rebuildMenu()
         } catch {
-            publish(localized("无法更改登录项：%@", error.localizedDescription))
+            publish(localized("无法更改登录项：%@", error.localizedDescription), kind: .problem)
         }
     }
 }

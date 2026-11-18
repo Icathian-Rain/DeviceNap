@@ -39,3 +39,5 @@
 "收到系统睡眠通知" = "System sleep notification received";
 "收到系统唤醒通知" = "System wake notification received";
 "%@ 已连接 · 距收到系统唤醒通知 %.2f 秒" = "%@ connected · %.2f s after the system wake notification";
+"等待蓝牙授权" = "Waiting for Bluetooth access";
+"蓝牙权限已允许" = "Bluetooth access allowed";

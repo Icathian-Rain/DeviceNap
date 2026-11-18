@@ -1,4 +1,55 @@
 import AppKit
+import OSLog
+
+enum LogKind: String {
+    case sleep, wake, connected, problem, connection
+
+    var color: NSColor {
+        switch self {
+        case .sleep: return .systemPurple
+        case .wake: return .systemBlue
+        case .connected: return .systemGreen
+        case .problem: return .systemRed
+        case .connection: return .labelColor
+        }
+    }
+
+    func write(_ message: String, persistent: Bool = false) {
+        Logger(subsystem: "local.devicenap", category: rawValue)
+            .log(level: persistent ? .default : .info, "\(message, privacy: .public)")
+    }
+}
+
+struct LogEntry: Decodable {
+    let timestamp: String
+    let eventMessage: String
+    let category: String
+
+    var time: String { String(timestamp.dropFirst(11).prefix(12)) }
+
+    var message: String {
+        switch eventMessage {
+        case "Bluetooth authorization: 0": return localized("等待蓝牙授权")
+        case "Bluetooth authorization: 1": return localized("系统限制了蓝牙权限")
+        case "Bluetooth authorization: 2": return localized("蓝牙权限已拒绝")
+        case "Bluetooth authorization: 3": return localized("蓝牙权限已允许")
+        default: return eventMessage
+        }
+    }
+
+    var kind: LogKind {
+        if let kind = LogKind(rawValue: category), kind != .connection { return kind }
+        // Logs written by earlier versions all used the connection category.
+        if ["收到系统睡眠通知", "System sleep notification received"].contains(eventMessage) { return .sleep }
+        if ["收到系统唤醒通知", "System wake notification received"].contains(eventMessage) { return .wake }
+        if eventMessage.contains("失败") || eventMessage.hasPrefix("未能") ||
+            eventMessage.hasPrefix("Could not") || eventMessage == "Bluetooth authorization: 2" {
+            return .problem
+        }
+        if eventMessage.contains(" 已连接") || eventMessage.contains(" connected") { return .connected }
+        return .connection
+    }
+}
 
 final class LogWindow: NSWindowController {
     private let textView = NSTextView.scrollableTextView()
@@ -71,15 +122,40 @@ final class LogWindow: NSWindowController {
             let result = Self.recentLog()
             DispatchQueue.main.async {
                 self.refreshButton.isEnabled = true
-                self.contents = result ?? ""
-                self.copyButton.isEnabled = !self.contents.isEmpty
-                self.logText.string = result.map {
-                    $0.isEmpty ? localized("最近 30 分钟没有日志") : $0
-                } ?? localized("无法读取 DeviceNap 日志，请重试。")
-                let end = (self.logText.string as NSString).length
-                self.logText.scrollRangeToVisible(NSRange(location: end, length: 0))
+                self.display(result)
             }
         }
+    }
+
+    private func display(_ entries: [LogEntry]?) {
+        guard let entries, !entries.isEmpty else {
+            contents = ""
+            copyButton.isEnabled = false
+            logText.string = entries == nil
+                ? localized("无法读取 DeviceNap 日志，请重试。")
+                : localized("最近 30 分钟没有日志")
+            return
+        }
+
+        let output = NSMutableAttributedString()
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.paragraphSpacing = 5
+        let timeFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium)
+        let messageFont = NSFont.systemFont(ofSize: 13)
+        for (index, entry) in entries.enumerated() {
+            if index > 0 { output.append(NSAttributedString(string: "\n")) }
+            output.append(NSAttributedString(string: "\(entry.time)  ", attributes: [
+                .foregroundColor: NSColor.secondaryLabelColor, .font: timeFont,
+            ]))
+            output.append(NSAttributedString(string: entry.message, attributes: [
+                .foregroundColor: entry.kind.color, .font: messageFont,
+            ]))
+        }
+        output.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: output.length))
+        contents = output.string
+        copyButton.isEnabled = true
+        logText.textStorage?.setAttributedString(output)
+        logText.scrollRangeToVisible(NSRange(location: output.length, length: 0))
     }
 
     @objc private func copyLog() {
@@ -88,11 +164,11 @@ final class LogWindow: NSWindowController {
         NSPasteboard.general.setString(contents, forType: .string)
     }
 
-    static func recentLog() -> String? {
+    static func recentLog() -> [LogEntry]? {
         let process = Process()
         let output = Pipe()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/log")
-        process.arguments = ["show", "--last", "30m", "--info", "--style", "compact",
+        process.arguments = ["show", "--last", "30m", "--info", "--style", "ndjson",
                              "--predicate", "subsystem == \"local.devicenap\""]
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
@@ -102,9 +178,9 @@ final class LogWindow: NSWindowController {
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { return nil }
 
-        return String(decoding: data, as: UTF8.self)
-            .split(whereSeparator: \.isNewline)
-            .filter { $0.contains("[local.devicenap:") }
-            .joined(separator: "\n")
+        let decoder = JSONDecoder()
+        return data.split(separator: 10).compactMap { line in
+            try? decoder.decode(LogEntry.self, from: Data(line))
+        }
     }
 }
