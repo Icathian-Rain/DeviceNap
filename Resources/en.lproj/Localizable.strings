@@ -23,3 +23,8 @@
 "无法读取已配对的蓝牙设备。" = "Could not read paired Bluetooth devices.";
 "已连接" = "Connected";
 "未连接" = "Disconnected";
+"请求蓝牙权限…" = "Request Bluetooth access…";
+"蓝牙权限已拒绝" = "Bluetooth access denied";
+"打开蓝牙隐私设置…" = "Open Bluetooth Privacy Settings…";
+"系统限制了蓝牙权限" = "Bluetooth access is restricted by macOS";
+"无法读取蓝牙权限" = "Could not determine Bluetooth access";

@@ -1,4 +1,5 @@
 import AppKit
+import CoreBluetooth
 import Darwin
 import IOBluetooth
 import IOKit.pwr_mgt
@@ -80,7 +81,7 @@ enum Bluetooth {
     }
 }
 
-final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentralManagerDelegate {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
     private let menu = NSMenu()
     private let work = DispatchQueue(label: "local.devicenap.bluetooth", qos: .userInitiated)
@@ -89,6 +90,9 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var devices: [Device] = []
     private var listing = false
     private var listFailed = false
+    private var permissionManager: CBCentralManager?
+    private var authorization: CBManagerAuthorization?
+    private var hasBluetoothAccess: Bool { CBCentralManager.authorization == .allowedAlways }
     private var sleeping = false
     private var generation = 0
     private var powerPort: io_connect_t = 0
@@ -107,8 +111,40 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate {
         rebuildMenu()
         item.menu = menu
         registerForPower()
-        if let selection { reconnect(selection, attempt: 1, generation: generation) }
-        refreshDevices()
+        requestBluetoothAccess()
+    }
+
+    private func requestBluetoothAccess() {
+        // The menu bar app owns the authorization request. Its short-lived
+        // Bluetooth helper should only run after the user grants access.
+        if CBCentralManager.authorization == .notDetermined, permissionManager == nil {
+            permissionManager = CBCentralManager(delegate: self, queue: nil,
+                options: [CBCentralManagerOptionShowPowerAlertKey: false])
+        }
+        updateAuthorization()
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        updateAuthorization()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        updateAuthorization()
+    }
+
+    private func updateAuthorization() {
+        let current = CBCentralManager.authorization
+        guard authorization != current else { return }
+        authorization = current
+        logger.info("Bluetooth authorization: \(current.rawValue)")
+        if current == .allowedAlways {
+            if let selection { reconnect(selection, attempt: 1, generation: generation) }
+            refreshDevices()
+        } else {
+            generation += 1
+            devices = []
+        }
+        rebuildMenu()
     }
 
     func registerForPower() {
@@ -133,7 +169,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate {
             generation += 1
             let port = powerPort
             let sleepGeneration = generation
-            guard let address = selection else {
+            guard hasBluetoothAccess, let address = selection else {
                 IOAllowPowerChange(port, token)
                 return
             }
@@ -169,7 +205,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func reconnect(_ address: String, attempt: Int, generation: Int) {
-        guard self.generation == generation, !sleeping else { return }
+        guard self.generation == generation, !sleeping, hasBluetoothAccess else { return }
         let name = selectionName
         publish(localized("正在连接 %@", name))
         work.async {
@@ -198,13 +234,14 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func refreshDevices() {
-        guard !listing, !sleeping else { return }
+        guard !listing, !sleeping, hasBluetoothAccess else { return }
         listing = true
         rebuildMenu()
         work.async {
             let result = Bluetooth.devices()
             DispatchQueue.main.async {
                 self.listing = false
+                guard self.hasBluetoothAccess else { return }
                 self.listFailed = result == nil
                 if let result {
                     self.devices = result.sorted { left, right in
@@ -225,12 +262,39 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return entry
     }
 
-    func menuWillOpen(_ menu: NSMenu) { refreshDevices() }
+    func menuWillOpen(_ menu: NSMenu) {
+        updateAuthorization()
+        refreshDevices()
+    }
 
     private func rebuildMenu() {
         menu.removeAllItems()
         _ = add(source == nil ? localized("无法订阅系统睡眠通知") : status, to: menu)
         menu.addItem(.separator())
+        switch CBCentralManager.authorization {
+        case .allowedAlways:
+            addDeviceControls()
+        case .notDetermined:
+            _ = add(localized("请求蓝牙权限…"), action: #selector(requestAccess), to: menu)
+        case .denied:
+            _ = add(localized("蓝牙权限已拒绝"), to: menu)
+            _ = add(localized("打开蓝牙隐私设置…"), action: #selector(openBluetoothPrivacy), to: menu)
+        case .restricted:
+            _ = add(localized("系统限制了蓝牙权限"), to: menu)
+        @unknown default:
+            _ = add(localized("无法读取蓝牙权限"), to: menu)
+        }
+        menu.addItem(.separator())
+        let service = SMAppService.mainApp
+        let login = add(localized("登录时启动"), action: #selector(toggleLogin), to: menu)
+        login.state = service.status == .enabled ? .on : .off
+        if service.status == .requiresApproval {
+            _ = add(localized("前往系统设置批准登录项"), action: #selector(openLoginSettings), to: menu)
+        }
+        _ = add(localized("退出 DeviceNap"), action: #selector(quit), to: menu, key: "q")
+    }
+
+    private func addDeviceControls() {
         let picker = add(localized("睡眠时断开的设备"), to: menu)
         let choices = NSMenu()
         picker.submenu = choices
@@ -251,14 +315,18 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if selection != nil { _ = add(localized("立即连接 %@", selectionName), action: #selector(connectNow), to: menu) }
         _ = add(localized("刷新设备"), action: #selector(refresh), to: menu)
-        menu.addItem(.separator())
-        let service = SMAppService.mainApp
-        let login = add(localized("登录时启动"), action: #selector(toggleLogin), to: menu)
-        login.state = service.status == .enabled ? .on : .off
-        if service.status == .requiresApproval {
-            _ = add(localized("前往系统设置批准登录项"), action: #selector(openLoginSettings), to: menu)
+    }
+
+    @objc private func requestAccess() {
+        if CBCentralManager.authorization == .notDetermined {
+            permissionManager = nil
+            requestBluetoothAccess()
         }
-        _ = add(localized("退出 DeviceNap"), action: #selector(quit), to: menu, key: "q")
+    }
+
+    @objc private func openBluetoothPrivacy() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func choose(_ sender: NSMenuItem) {
