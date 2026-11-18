@@ -1,1 +1,1 @@
-"NSBluetoothAlwaysUsageDescription" = "DeviceNap uses Bluetooth access to disconnect and reconnect the device you select.";
+"NSBluetoothAlwaysUsageDescription" = "DeviceNap uses Bluetooth access to manage Bluetooth during sleep and reconnect the device you select.";

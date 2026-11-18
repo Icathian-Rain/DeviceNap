@@ -12,6 +12,6 @@
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>DeviceNap uses Bluetooth access to disconnect and reconnect the device you select.</string>
+    <string>DeviceNap uses Bluetooth access to manage Bluetooth during sleep and reconnect the device you select.</string>
 </dict>
 </plist>

@@ -1,1 +1,1 @@
-"NSBluetoothAlwaysUsageDescription" = "DeviceNap 需要蓝牙权限，以在睡眠前断开、唤醒后重连你选择的设备。";
+"NSBluetoothAlwaysUsageDescription" = "DeviceNap 需要蓝牙权限，以管理睡眠期间的蓝牙状态并重连你选择的设备。";

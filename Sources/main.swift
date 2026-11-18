@@ -21,6 +21,7 @@ struct Device: Codable {
 // Run Bluetooth operations in a short-lived process so a stalled system call
 // cannot freeze the menu or hold the sleep acknowledgement indefinitely.
 func bluetoothHelper(_ arguments: [String]) -> Int32 {
+    if arguments.first == "power" { return BluetoothPower.helper(arguments) }
     let devices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
     if arguments == ["list"] {
         let entries = devices.compactMap { device -> Device? in
@@ -35,8 +36,6 @@ func bluetoothHelper(_ arguments: [String]) -> Int32 {
     guard arguments.count == 2,
           let device = devices.first(where: { $0.addressString == arguments[1] }) else { return 1 }
     switch arguments[0] {
-    case "disconnect":
-        return !device.isConnected() || device.closeConnection() == kIOReturnSuccess ? 0 : 1
     case "connect":
         return device.isConnected() || device.openConnection() == kIOReturnSuccess ? 0 : 1
     default:
@@ -86,6 +85,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
     private lazy var logWindow = LogWindow()
     private let work = DispatchQueue(label: "local.devicenap.bluetooth", qos: .userInitiated)
     private let preferences = UserDefaults.standard
+    private let restorePowerKey = "restoreBluetoothPower"
     private var devices: [Device] = []
     private var listing = false
     private var listFailed = false
@@ -94,6 +94,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
     private var hasBluetoothAccess: Bool { CBCentralManager.authorization == .allowedAlways }
     private var sleeping = false
     private var wakeTime: DispatchTime?
+    private var waitingForSystemWake = false
     private var generation = 0
     private var powerPort: io_connect_t = 0
     private var notifications: IONotificationPortRef?
@@ -111,6 +112,10 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
         rebuildMenu()
         item.menu = menu
         registerForPower()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(screensDidWake(_:)),
+            name: NSWorkspace.screensDidWakeNotification, object: nil
+        )
         requestBluetoothAccess()
     }
 
@@ -138,7 +143,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
         authorization = current
         LogKind.connection.write("Bluetooth authorization: \(current.rawValue)")
         if current == .allowedAlways {
-            if let selection { reconnect(selection, attempt: 1, generation: generation) }
+            restorePowerAndReconnect(generation: generation)
             refreshDevices()
         } else {
             generation += 1
@@ -167,15 +172,15 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
         case 0xe0000280: // kIOMessageSystemWillSleep
             sleeping = true
             wakeTime = nil
+            waitingForSystemWake = false
             LogKind.sleep.write(localized("收到系统睡眠通知"), persistent: true)
             generation += 1
             let port = powerPort
             let sleepGeneration = generation
-            guard hasBluetoothAccess, let address = selection else {
+            guard hasBluetoothAccess, preferences.bool(forKey: "powerOffOnSleep") else {
                 IOAllowPowerChange(port, token)
                 return
             }
-            let name = selectionName
             // Acknowledge even if preceding Bluetooth work is still in flight.
             var acknowledged = false
             func acknowledge() {
@@ -189,25 +194,89 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
                 let now = DispatchTime.now().uptimeNanoseconds
                 let end = deadline.uptimeNanoseconds
                 let remaining = now < end ? Double(end - now) / 1_000_000_000 : 0
-                let requested = remaining > 0.2 &&
-                    Bluetooth.run(["disconnect", address], timeout: min(remaining, 3)) != nil
+                let result = self.powerOffForSleep(remaining: remaining)
+
                 DispatchQueue.main.async {
                     acknowledge()
-                    guard self.sleeping, self.generation == sleepGeneration else { return }
-                    self.publish(
-                        requested ? localized("已请求断开 %@", name) : localized("睡眠前断开 %@ 失败", name),
-                        kind: requested ? .connection : .problem
-                    )
+                    guard let result, self.sleeping, self.generation == sleepGeneration else { return }
+                    self.publish(result.0, kind: result.1, persistent: true)
                 }
             }
         case 0xe0000300: // kIOMessageSystemHasPoweredOn
-            wakeTime = .now()
-            sleeping = false
             LogKind.wake.write(localized("收到系统唤醒通知"), persistent: true)
-            generation += 1
-            if let address = selection { reconnect(address, attempt: 1, generation: generation) }
+            if sleeping {
+                resumeAfterSleep()
+            } else if waitingForSystemWake {
+                waitingForSystemWake = false
+                if (wakeTime != nil || preferences.bool(forKey: restorePowerKey)), hasBluetoothAccess {
+                    // Replace any scheduled screen-wake retry with a fresh round.
+                    LogKind.wake.write(localized("系统唤醒后补试连接"), persistent: true)
+                    generation += 1
+                    restorePowerAndReconnect(generation: generation)
+                }
+            }
         default:
             break
+        }
+    }
+
+    @objc private func screensDidWake(_ notification: Notification) {
+        DispatchQueue.main.async {
+            guard self.sleeping else { return }
+            self.waitingForSystemWake = true
+            LogKind.wake.write(localized("收到屏幕唤醒通知"), persistent: true)
+            self.resumeAfterSleep()
+        }
+    }
+
+    private func resumeAfterSleep() {
+        guard sleeping else { return }
+        wakeTime = .now()
+        sleeping = false
+        generation += 1
+        restorePowerAndReconnect(generation: generation)
+    }
+
+    private func powerOffForSleep(remaining: Double) -> (String, LogKind)? {
+        let failed = (localized("睡眠前未能确认整机蓝牙关闭"), LogKind.problem)
+        guard remaining > 1 else { return failed }
+        let state = Bluetooth.run(["power"], timeout: 0.8)
+        if state == Data("0\n".utf8) { return nil }
+        guard state == Data("1\n".utf8) else { return failed }
+
+        // Store the previous state before changing the controller so a relaunched
+        // app can recover even if the helper or app stops during sleep.
+        preferences.set(true, forKey: restorePowerKey)
+        guard Bluetooth.run(["power", "0"], timeout: remaining - 0.9) != nil else { return failed }
+        return (localized("睡眠前已关闭整机蓝牙"), .sleep)
+    }
+
+    private func restorePowerAndReconnect(generation: Int, attempt: Int = 1) {
+        guard self.generation == generation, !sleeping, hasBluetoothAccess else { return }
+        work.async {
+            let needsRestore = self.preferences.bool(forKey: self.restorePowerKey)
+            let restored = !needsRestore || Bluetooth.run(["power", "1"], timeout: 4) != nil
+            if needsRestore, restored {
+                self.preferences.removeObject(forKey: self.restorePowerKey)
+                LogKind.wake.write(localized("已恢复整机蓝牙"), persistent: true)
+            }
+            DispatchQueue.main.async {
+                guard self.generation == generation, !self.sleeping else { return }
+                if restored {
+                    if let selection = self.selection {
+                        self.reconnect(selection, attempt: 1, generation: generation)
+                    } else if needsRestore {
+                        self.publish(localized("已恢复整机蓝牙"), kind: .wake)
+                        self.refreshDevices()
+                    }
+                } else if attempt < 3 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                        self.restorePowerAndReconnect(generation: generation, attempt: attempt + 1)
+                    }
+                } else {
+                    self.publish(localized("未能恢复整机蓝牙 · 可在菜单重试"), kind: .problem, persistent: true)
+                }
+            }
         }
     }
 
@@ -223,7 +292,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
                 if confirmed {
                     if let wakeTime = self.wakeTime {
                         let seconds = Double(DispatchTime.now().uptimeNanoseconds - wakeTime.uptimeNanoseconds) / 1_000_000_000
-                        let message = localized("%@ 已连接 · 距收到系统唤醒通知 %.2f 秒", name, seconds)
+                        let message = localized("%@ 已连接 · 距首次收到唤醒通知 %.2f 秒", name, seconds)
                         self.publish(message, kind: .connected, persistent: true)
                         self.wakeTime = nil
                     } else {
@@ -234,6 +303,8 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
                     DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                         self.reconnect(address, attempt: attempt + 1, generation: generation)
                     }
+                } else if self.waitingForSystemWake, self.wakeTime != nil {
+                    self.publish(localized("%@ 尚未连接 · 等待系统唤醒通知", name))
                 } else {
                     self.publish(localized("未能连接 %@ · 可手动重试", name), kind: .problem)
                 }
@@ -310,7 +381,7 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
     }
 
     private func addDeviceControls() {
-        let picker = add(localized("睡眠时断开的设备"), to: menu)
+        let picker = add(localized("唤醒或登录后重连的设备"), to: menu)
         let choices = NSMenu()
         picker.submenu = choices
         let none = add(localized("无"), action: #selector(choose(_:)), to: choices)
@@ -330,6 +401,13 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
         }
         if selection != nil { _ = add(localized("立即连接 %@", selectionName), action: #selector(connectNow), to: menu) }
         _ = add(localized("刷新设备"), action: #selector(refresh), to: menu)
+        let powerOff = add(localized("睡眠时关闭整机蓝牙"), action: #selector(togglePowerOffOnSleep), to: menu)
+        powerOff.state = preferences.bool(forKey: "powerOffOnSleep") ? .on : .off
+        let unavailable = add(localized("睡眠时只断开单个设备 · 暂不可用"), to: menu)
+        unavailable.toolTip = localized("当前接口无法可靠断开蓝牙鼠标，详见 README。")
+        if preferences.bool(forKey: restorePowerKey) {
+            _ = add(localized("立即恢复整机蓝牙"), action: #selector(connectNow), to: menu)
+        }
     }
 
     @objc private func requestAccess() {
@@ -353,10 +431,14 @@ final class DeviceNap: NSObject, NSApplicationDelegate, NSMenuDelegate, CBCentra
         publish(device.map { localized("正在监控 %@", $0.name) } ?? localized("请选择一台已配对设备"))
     }
 
+    @objc private func togglePowerOffOnSleep() {
+        preferences.set(!preferences.bool(forKey: "powerOffOnSleep"), forKey: "powerOffOnSleep")
+        rebuildMenu()
+    }
+
     @objc private func connectNow() {
-        guard let selection else { return }
         generation += 1
-        reconnect(selection, attempt: 1, generation: generation)
+        restorePowerAndReconnect(generation: generation)
     }
 
     @objc private func refresh() { refreshDevices() }
